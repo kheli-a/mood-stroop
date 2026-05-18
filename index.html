@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0a0a0a">
+  <title>Mood Stroop</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100vw; height: 100vh; overflow: hidden;
+      background: #0a0a0a;
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+      user-select: none; -webkit-tap-highlight-color: transparent;
+      color: white;
+    }
+    body {
+      display: flex; align-items: center; justify-content: center;
+      transition: background-color 350ms ease-out;
+    }
+    .stage {
+      position: relative; width: 100%; height: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 6vh 6vw; text-align: center;
+      transition: color 250ms ease-out;
+    }
+    h1     { font-size: clamp(44px, 11vw, 110px); font-weight: 900; letter-spacing: -0.02em; line-height: 1; }
+    .sub   { font-size: clamp(18px, 3vw, 30px);   font-weight: 500; opacity: 0.85; margin-top: 0.6em; }
+    .prompt{ font-size: clamp(24px, 5vw, 52px);   font-weight: 700; line-height: 1.25; max-width: 92vw; }
+    .target{ font-size: clamp(56px, 16vw, 200px); font-weight: 900; letter-spacing: 0.01em; text-transform: uppercase; line-height: 1; }
+    .verdict{font-size: clamp(36px, 9vw, 110px);  font-weight: 900; }
+    .score { font-size: clamp(80px, 24vw, 280px); font-weight: 900; letter-spacing: -0.04em; line-height: 1; }
+    .small { font-size: clamp(14px, 2.5vw, 24px); font-weight: 500; opacity: 0.85; }
+    .gap-1 { margin-top: 1.5vh; }
+    .gap-2 { margin-top: 3vh; }
+    .gap-3 { margin-top: 5vh; }
+    .top { position: absolute; top: 3.5vh; left: 0; right: 0;
+           font-size: clamp(14px, 2.4vw, 22px); font-weight: 500; opacity: 0.85; }
+    .bottom { position: absolute; bottom: 3.5vh; left: 0; right: 0;
+              font-size: clamp(14px, 2.4vw, 22px); font-weight: 500; opacity: 0.8; }
+    .dot   { display: inline-block; width: 0.45em; height: 0.45em; border-radius: 50%; vertical-align: middle;
+             background: currentColor; margin-right: 0.4em; animation: blink 1s infinite; }
+    @keyframes blink { 0%, 60% { opacity: 1; } 70%, 100% { opacity: 0.25; } }
+    .err   { color: #ff7070; font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="stage" id="stage"></div>
+
+<script>
+"use strict";
+
+// ============================================================================
+// Config
+// ============================================================================
+const CHUNK_SECONDS    = 4;
+const SCORE_FLOOR      = 0.15;
+const TOP_K            = 5;
+const ROUNDS_PER_GAME  = 5;
+const ANALYZE_PATH     = "/api/analyze";
+const INITIAL_HSV      = [180 / 360, 0.40, 0.70]; // Neutral cyan
+const SMOOTH_ALPHA     = 0.06;
+
+// ============================================================================
+// Anchors + Hume emotion → anchor mapping (mirrors mood_ring.py)
+// ============================================================================
+const ANCHORS = {
+  Joy:         [ 50, 0.85, 1.00],
+  Excitement:  [ 30, 0.95, 1.00],
+  Calmness:    [140, 0.65, 0.80],
+  Contentment: [160, 0.55, 0.85],
+  Sadness:     [220, 0.75, 0.55],
+  Anger:       [  0, 1.00, 0.90],
+  Fear:        [280, 0.80, 0.70],
+  Anxiety:     [270, 0.70, 0.75],
+  Surprise:    [ 35, 0.90, 1.00],
+  Neutral:     [180, 0.40, 0.70],
+};
+
+const EMOTION_TO_ANCHOR = {
+  "Admiration":             "Contentment",
+  "Adoration":              "Contentment",
+  "Aesthetic Appreciation": "Contentment",
+  "Amusement":              "Joy",
+  "Anger":                  "Anger",
+  "Anxiety":                "Anxiety",
+  "Awe":                    "Contentment",
+  "Awkwardness":            "Anxiety",
+  "Boredom":                "Sadness",
+  "Calmness":               "Calmness",
+  "Concentration":          "Calmness",
+  "Confusion":              "Anxiety",
+  "Contemplation":          "Calmness",
+  "Contempt":               "Anger",
+  "Contentment":            "Contentment",
+  "Craving":                "Surprise",
+  "Desire":                 "Surprise",
+  "Determination":          "Excitement",
+  "Disappointment":         "Sadness",
+  "Disgust":                "Anger",
+  "Distress":               "Sadness",
+  "Doubt":                  "Anxiety",
+  "Ecstasy":                "Excitement",
+  "Embarrassment":          "Sadness",
+  "Empathic Pain":          "Sadness",
+  "Entrancement":           "Surprise",
+  "Envy":                   "Anger",
+  "Excitement":             "Excitement",
+  "Fear":                   "Fear",
+  "Guilt":                  "Sadness",
+  "Horror":                 "Fear",
+  "Interest":               "Surprise",
+  "Joy":                    "Joy",
+  "Love":                   "Contentment",
+  "Nostalgia":              "Contentment",
+  "Pain":                   "Sadness",
+  "Pride":                  "Excitement",
+  "Realization":            "Joy",
+  "Relief":                 "Calmness",
+  "Romance":                "Contentment",
+  "Sadness":                "Sadness",
+  "Satisfaction":           "Contentment",
+  "Shame":                  "Sadness",
+  "Surprise (negative)":    "Fear",
+  "Surprise (positive)":    "Surprise",
+  "Sympathy":               "Contentment",
+  "Tiredness":              "Sadness",
+  "Triumph":                "Excitement",
+};
+
+// ============================================================================
+// Game prompts (sentence → natural-trap emotion, target emotion)
+// ============================================================================
+const GAME_PROMPTS = [
+  { sentence: "I just won the lottery!", natural: "Excitement", target: "Anger" },
+  { sentence: "I'm so happy I got free tickets to the concert next week.", natural: "Joy", target: "Anger" },
+  { sentence: "Wow, Kesha put on a surprise performance in San Francisco.", natural: "Excitement", target: "Sadness" },
+  { sentence: "My grandma passed away last week.", natural: "Sadness", target: "Joy" },
+  { sentence: "There's a spider crawling up my arm right now.", natural: "Fear", target: "Calmness" },
+  { sentence: "I just lost my wedding ring at the beach.", natural: "Sadness", target: "Excitement" },
+  { sentence: "Someone scratched my brand new car in the parking lot.", natural: "Anger", target: "Joy" },
+  { sentence: "We're getting married next month!", natural: "Joy", target: "Sadness" },
+  { sentence: "I haven't slept in three days.", natural: "Sadness", target: "Excitement" },
+  { sentence: "I just got accepted to my dream school!", natural: "Joy", target: "Anger" },
+  { sentence: "It's been raining nonstop for a week.", natural: "Sadness", target: "Joy" },
+  { sentence: "I think I just saw a ghost in my hallway.", natural: "Fear", target: "Joy" },
+  { sentence: "My favorite restaurant is closing forever.", natural: "Sadness", target: "Excitement" },
+  { sentence: "I burned my entire dinner.", natural: "Anger", target: "Calmness" },
+  { sentence: "We're having a baby!", natural: "Joy", target: "Anger" },
+];
+
+// ============================================================================
+// Color utilities (mirror mood_ring.py)
+// ============================================================================
+function hsvToRgb(h, s, v) {
+  const i = Math.floor(h * 6) % 6;
+  const f = h * 6 - Math.floor(h * 6);
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  return [[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i];
+}
+function rgbCss(hsv) {
+  const [r, g, b] = hsvToRgb(...hsv);
+  return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+}
+function anchorToHsv(name) {
+  const [h, s, v] = ANCHORS[name] || ANCHORS.Neutral;
+  return [h / 360, s, v];
+}
+function inkCss(hsv) {
+  // Same hue as the background, brightness-adjusted for contrast.
+  const luma = 0.299 * hsvToRgb(...hsv)[0] + 0.587 * hsvToRgb(...hsv)[1]
+             + 0.114 * hsvToRgb(...hsv)[2];
+  // luma is 0..1 here; pick black on bright bg, white on dark bg.
+  return luma > 0.55 ? "#0e0e10" : "rgba(255,255,255,0.95)";
+}
+function detectedAnchor(emotions) {
+  const items = Object.entries(emotions || {});
+  if (!items.length) return { anchor: "Neutral", score: 0, topName: "" };
+  let top = items[0];
+  for (const it of items) if (it[1] > top[1]) top = it;
+  if (top[1] < SCORE_FLOOR) return { anchor: "Neutral", score: top[1], topName: top[0] };
+  return { anchor: EMOTION_TO_ANCHOR[top[0]] || "Neutral", score: top[1], topName: top[0] };
+}
+function scoreRound(detected, target, natural) {
+  if (detected === target)  return  1;
+  if (detected === natural) return -1;
+  return 0;
+}
+function smoothTo(curr, target, alpha = SMOOTH_ALPHA) {
+  let [h, s, v] = curr;
+  const [th, ts, tv] = target;
+  // Shortest path around the hue circle.
+  let diff = ((th - h + 0.5) % 1 + 1) % 1 - 0.5;
+  h = (h + diff * alpha + 1) % 1;
+  s += (ts - s) * alpha;
+  v += (tv - v) * alpha;
+  return [h, s, v];
+}
+
+// ============================================================================
+// Audio capture (MediaRecorder, ~4 s clips of webm/opus)
+// ============================================================================
+async function recordClip(seconds) {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  // Prefer webm/opus, fall back to default — Hume accepts both.
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : (MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "");
+  const recorder = mimeType ? new MediaRecorder(stream, { mimeType })
+                            : new MediaRecorder(stream);
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+  return new Promise((resolve, reject) => {
+    recorder.onerror = (e) => { stream.getTracks().forEach(t => t.stop()); reject(e.error || e); };
+    recorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      resolve(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+    };
+    recorder.start();
+    setTimeout(() => { if (recorder.state !== "inactive") recorder.stop(); }, seconds * 1000);
+  });
+}
+
+async function analyzeClip(blob) {
+  const res = await fetch(ANALYZE_PATH, {
+    method: "POST",
+    body: blob,
+    headers: { "Content-Type": blob.type || "audio/webm" },
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).error || ""; } catch (_) {}
+    throw new Error(`Analyzer ${res.status}${detail ? ": " + detail : ""}`);
+  }
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data.emotions || {};
+}
+
+// ============================================================================
+// Game state machine
+// ============================================================================
+const PHASES = {
+  TITLE: "title",
+  ROUND_INTRO: "round_intro",
+  RECORDING: "recording",
+  ANALYZING: "analyzing",
+  ROUND_RESULT: "round_result",
+  FINAL: "final",
+  ERROR: "error",
+};
+
+const state = {
+  phase: PHASES.TITLE,
+  phaseStartedAt: performance.now(),
+  roundIndex: 0,
+  totalScore: 0,
+  lastDelta: 0,
+  lastDetected: "",
+  prompts: [],
+  errorMsg: "",
+  targetHsv: INITIAL_HSV.slice(),
+  currentHsv: INITIAL_HSV.slice(),
+};
+
+function shuffleAndPick(arr, n) {
+  const copy = arr.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, n);
+}
+
+function beginGame() {
+  state.prompts = shuffleAndPick(GAME_PROMPTS, ROUNDS_PER_GAME);
+  state.roundIndex = 0;
+  state.totalScore = 0;
+  state.lastDelta = 0;
+  state.lastDetected = "";
+  state.errorMsg = "";
+  setPhase(PHASES.ROUND_INTRO);
+}
+
+function setPhase(p) {
+  state.phase = p;
+  state.phaseStartedAt = performance.now();
+}
+
+async function advance() {
+  // Block input mid-recording / mid-analysis.
+  if (state.phase === PHASES.RECORDING || state.phase === PHASES.ANALYZING) return;
+
+  if (state.phase === PHASES.TITLE) {
+    beginGame();
+  } else if (state.phase === PHASES.ROUND_INTRO) {
+    setPhase(PHASES.RECORDING);
+    await runRound();
+  } else if (state.phase === PHASES.ROUND_RESULT) {
+    state.roundIndex++;
+    setPhase(state.roundIndex >= state.prompts.length ? PHASES.FINAL : PHASES.ROUND_INTRO);
+  } else if (state.phase === PHASES.FINAL || state.phase === PHASES.ERROR) {
+    beginGame();
+  }
+}
+
+async function runRound() {
+  try {
+    const blob = await recordClip(CHUNK_SECONDS);
+    setPhase(PHASES.ANALYZING);
+    const emotions = await analyzeClip(blob);
+
+    const prompt = state.prompts[state.roundIndex];
+    const { anchor } = detectedAnchor(emotions);
+    state.lastDetected = anchor;
+    state.lastDelta = scoreRound(anchor, prompt.target, prompt.natural);
+    state.totalScore += state.lastDelta;
+    setPhase(PHASES.ROUND_RESULT);
+  } catch (e) {
+    console.error(e);
+    state.errorMsg = (e && e.message) || String(e);
+    setPhase(PHASES.ERROR);
+  }
+}
+
+// ============================================================================
+// Render
+// ============================================================================
+function updateTargetColor(now) {
+  if (state.phase === PHASES.ROUND_INTRO) {
+    state.targetHsv = anchorToHsv(state.prompts[state.roundIndex].target);
+  } else if (state.phase === PHASES.ROUND_RESULT) {
+    state.targetHsv = anchorToHsv(state.lastDetected || "Neutral");
+  } else if (state.phase === PHASES.FINAL) {
+    const t = (now - state.phaseStartedAt) / 1000;
+    state.targetHsv = [(t * 0.40) % 1, 0.92, 1.0];
+  } else {
+    state.targetHsv = INITIAL_HSV.slice();
+  }
+}
+
+function fmt(n) { return n >= 0 ? "+" + n : String(n); }
+function esc(s)  { return s.replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function renderTitle() {
+  return `
+    <h1>Mood Stroop</h1>
+    <div class="sub">say it wrong on purpose</div>
+    <div class="bottom">
+      <div>5 rounds · +1 target · −1 trap · 0 anything else</div>
+      <div class="gap-1">Tap or press SPACE to begin</div>
+    </div>`;
+}
+
+function renderRoundIntro() {
+  const p = state.prompts[state.roundIndex];
+  return `
+    <div class="top">Round ${state.roundIndex + 1} of ${state.prompts.length} · Score ${fmt(state.totalScore)}</div>
+    <div class="prompt">“${esc(p.sentence)}”</div>
+    <div class="small gap-2">say it in</div>
+    <div class="target">${esc(p.target)}</div>
+    <div class="bottom">Tap or press SPACE to record (4 s)</div>`;
+}
+
+function renderRecording(now) {
+  const p = state.prompts[state.roundIndex];
+  const elapsed = (now - state.phaseStartedAt) / 1000;
+  const remaining = Math.max(0, Math.ceil(CHUNK_SECONDS - elapsed));
+  return `
+    <div class="top">Round ${state.roundIndex + 1} of ${state.prompts.length}</div>
+    <div class="prompt">“${esc(p.sentence)}”</div>
+    <div class="target gap-3"><span class="dot"></span>${remaining}</div>`;
+}
+
+function renderAnalyzing() {
+  const p = state.prompts[state.roundIndex];
+  return `
+    <div class="top">Round ${state.roundIndex + 1} of ${state.prompts.length}</div>
+    <div class="prompt">“${esc(p.sentence)}”</div>
+    <div class="target gap-3">analyzing…</div>`;
+}
+
+function renderRoundResult() {
+  const p = state.prompts[state.roundIndex];
+  const verdict =
+    state.lastDelta ===  1 ? "+1 nailed it" :
+    state.lastDelta === -1 ? "−1 trap got you" :
+                              "0 different emotion";
+  const next = state.roundIndex + 1 < state.prompts.length
+    ? "Tap or SPACE for next round"
+    : "Tap or SPACE for final score";
+  return `
+    <div class="top">Round ${state.roundIndex + 1} of ${state.prompts.length} · Score ${fmt(state.totalScore)}</div>
+    <div class="verdict">${verdict}</div>
+    <div class="small gap-1">target: ${esc(p.target)}    ·    you read as: ${esc(state.lastDetected || "Neutral")}</div>
+    <div class="bottom">${next}</div>`;
+}
+
+function renderFinal() {
+  const n = state.prompts.length;
+  const msg =
+    state.totalScore >= n           ? "Perfect.  Emotional ninja." :
+    state.totalScore >= n * 0.6     ? "Strong vocal control." :
+    state.totalScore >= 0           ? "Not bad — the traps are sneaky." :
+                                       "The natural emotion is a tractor beam.";
+  return `
+    <h1>Final Score</h1>
+    <div class="score gap-1">${fmt(state.totalScore)} / ${n}</div>
+    <div class="prompt gap-2">${msg}</div>
+    <div class="bottom">Tap or SPACE to play again</div>`;
+}
+
+function renderError() {
+  return `
+    <h1>Hmm.</h1>
+    <div class="prompt gap-2">Something went wrong with the recording or analysis.</div>
+    <div class="small gap-1 err">${esc(state.errorMsg || "")}</div>
+    <div class="bottom">Tap or SPACE to start over</div>`;
+}
+
+const stage = document.getElementById("stage");
+
+function renderFrame(now) {
+  updateTargetColor(now);
+  state.currentHsv = smoothTo(state.currentHsv, state.targetHsv);
+  document.body.style.backgroundColor = rgbCss(state.currentHsv);
+  stage.style.color = inkCss(state.currentHsv);
+
+  let html;
+  switch (state.phase) {
+    case PHASES.TITLE:        html = renderTitle();         break;
+    case PHASES.ROUND_INTRO:  html = renderRoundIntro();    break;
+    case PHASES.RECORDING:    html = renderRecording(now);  break;
+    case PHASES.ANALYZING:    html = renderAnalyzing();     break;
+    case PHASES.ROUND_RESULT: html = renderRoundResult();   break;
+    case PHASES.FINAL:        html = renderFinal();         break;
+    case PHASES.ERROR:        html = renderError();         break;
+    default:                  html = "";
+  }
+  if (stage.innerHTML !== html) stage.innerHTML = html;
+
+  requestAnimationFrame(renderFrame);
+}
+
+// ============================================================================
+// Input
+// ============================================================================
+function handleAdvance(e) {
+  // Don't intercept text-entry / form inputs (defensive — there are none).
+  if (e && e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+  if (e && e.preventDefault) e.preventDefault();
+  advance();
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === " " || e.code === "Space" || e.key === "Enter") handleAdvance(e);
+});
+document.addEventListener("click", handleAdvance);
+document.addEventListener("touchstart", handleAdvance, { passive: false });
+
+// ============================================================================
+// Boot
+// ============================================================================
+requestAnimationFrame(renderFrame);
+</script>
+</body>
+</html>
