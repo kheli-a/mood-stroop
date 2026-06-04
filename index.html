@@ -42,7 +42,17 @@
     .dot   { display: inline-block; width: 0.45em; height: 0.45em; border-radius: 50%; vertical-align: middle;
              background: currentColor; margin-right: 0.4em; animation: blink 1s infinite; }
     @keyframes blink { 0%, 60% { opacity: 1; } 70%, 100% { opacity: 0.25; } }
-    .err   { color: #ff7070; font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
+    .err   { color: #ff7070; }
+    .errbox{
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: clamp(16px, 2.6vw, 22px);
+      max-width: 90vw;
+      padding: 1em 1.4em;
+      background: rgba(0,0,0,0.35);
+      border-radius: 10px;
+      word-break: break-word;
+      line-height: 1.4;
+    }
   </style>
 </head>
 <body>
@@ -201,29 +211,60 @@ function smoothTo(curr, target, alpha = SMOOTH_ALPHA) {
 }
 
 // ============================================================================
-// Audio capture (MediaRecorder, ~4 s clips of webm/opus)
+// Audio capture (MediaRecorder)
+//
+// Acquire the mic stream ONCE per session and reuse it across rounds. If we
+// called getUserMedia per round, iOS Safari (and some Android browsers) will
+// re-show the permission prompt every time — and on iOS the prompt can take
+// long enough to dismiss that it eats the recording window.
 // ============================================================================
+let micStream = null;
+
+async function getMicStream() {
+  if (micStream && micStream.active) return micStream;
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  return micStream;
+}
+
+function pickMimeType() {
+  // First match wins. iOS Safari only supports audio/mp4 here; Chrome,
+  // Firefox, and Android Chrome prefer webm/opus. Hume accepts all of them.
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4;codecs=mp4a.40.2",
+    "audio/mp4",
+    "audio/ogg;codecs=opus",
+    "audio/ogg",
+  ];
+  for (const t of candidates) {
+    if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return ""; // let the browser choose
+}
+
 async function recordClip(seconds) {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  // Prefer webm/opus, fall back to default — Hume accepts both.
-  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-    ? "audio/webm;codecs=opus"
-    : (MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "");
+  const stream = await getMicStream();
+  const mimeType = pickMimeType();
   const recorder = mimeType ? new MediaRecorder(stream, { mimeType })
                             : new MediaRecorder(stream);
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
   return new Promise((resolve, reject) => {
-    recorder.onerror = (e) => { stream.getTracks().forEach(t => t.stop()); reject(e.error || e); };
-    recorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      resolve(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
-    };
+    // Note: we deliberately do NOT stop the underlying stream here — keeping
+    // it alive between rounds is what prevents re-prompting.
+    recorder.onerror = (e) => reject(e.error || new Error("MediaRecorder error"));
+    recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
     recorder.start();
     setTimeout(() => { if (recorder.state !== "inactive") recorder.stop(); }, seconds * 1000);
   });
 }
+
+// Release the mic when the page unloads.
+window.addEventListener("beforeunload", () => {
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+});
 
 async function analyzeClip(blob) {
   const res = await fetch(ANALYZE_PATH, {
@@ -418,8 +459,8 @@ function renderFinal() {
 function renderError() {
   return `
     <h1>Hmm.</h1>
-    <div class="prompt gap-2">Something went wrong with the recording or analysis.</div>
-    <div class="small gap-1 err">${esc(state.errorMsg || "")}</div>
+    <div class="prompt gap-2">Something went wrong.</div>
+    <div class="errbox gap-2 err">${esc(state.errorMsg || "(no detail)")}</div>
     <div class="bottom">Tap or SPACE to start over</div>`;
 }
 
